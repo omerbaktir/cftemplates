@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  MyVPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: '10.0.0.0/16'
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: MyKafkaVPC
+
+  MySubnet:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: '10.0.1.0/24'
+      AvailabilityZone: 'us-east-1a'
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: MyKafkaSubnet
+
+  MySecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Allow Kafka traffic
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0  # For SSH access
+        - IpProtocol: tcp
+          FromPort: 9092
+          ToPort: 9092
+          CidrIp: 0.0.0.0/0  # Kafka traffic
+        - IpProtocol: tcp
+          FromPort: 9093
+          ToPort: 9093
+          CidrIp: 0.0.0.0/0  # Kafka KRaft Controller traffic
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0  # Allow all outbound
+
+  KafkaInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - !Ref KafkaRole
+
+  KafkaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+
+  KafkaEC2Instance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      InstanceType: 't3.medium'
+      ImageId: 'ami-0c55b159cbfafe1f0'  # Amazon Linux 2 AMI ID for us-east-1
+      SubnetId: !Ref MySubnet
+      SecurityGroupIds:
+        - !Ref MySecurityGroup
+      KeyName: your-ssh-key  # Replace with your SSH key pair
+      IamInstanceProfile: !Ref KafkaInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Install Java
+          sudo yum install java-1.8.0-openjdk-devel -y
+          
+          # Download and install Kafka
+          wget https://downloads.apache.org/kafka/3.0.0/kafka_2.13-3.0.0.tgz
+          tar -xvf kafka_2.13-3.0.0.tgz
+          cd kafka_2.13-3.0.0
+
+          # Configure Kafka in KRaft mode
+          cat <<EOL > config/server.properties
+          process.roles=broker,controller
+          node.id=1
+          controller.quorum.voters=1@localhost:9093
+          listeners=PLAINTEXT://localhost:9092,CONTROLLER://localhost:9093
+          log.dirs=/var/log/kafka-logs
+          EOL
+
+          # Format the storage for KRaft
+          bin/kafka-storage.sh format --config config/server.properties --cluster-id \$(bin/kafka-storage.sh random-uuid)
+
+          # Start Kafka in KRaft mode
+          bin/kafka-server-start.sh config/server.properties > /var/log/kafka.log 2>&1 &
